@@ -1,0 +1,198 @@
+---
+title: "Analytics_Project"
+output: html_document
+date: "2022-11-18"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Reading the dataset and updating the data-type
+
+```{r}
+#install.packages("tidyverse")
+library(tidyverse)
+#install.packages('mltools')
+library(mltools)
+#install.packages("splitstackshape")
+#library(splitstackshape)
+#install.packages("data.table")
+library(data.table)
+#install.packages("caTools")
+library(caTools) 
+#install.packages("ROSE")
+library(ROSE) 
+#install.packages("FSelector")
+#library(FSelector)
+#install.packages("e1071")
+library(e1071)
+#install.packages("caret")
+library(caret) 
+
+
+orignal_datafile <- read.csv("analytics_data.csv")
+
+# Copy to a new variable so that the program is reproducible
+new_datafile<-filter(orignal_datafile, email_segment != "No E-Mail")
+
+#Removing rendundant columns
+new_datafile$Customer_ID <- NULL
+new_datafile$account <- NULL
+new_datafile$spend <- NULL
+
+#Replace the spaces and hyphen with underscore
+index_men_email <- which(new_datafile$email_segment == "Mens E-Mail")
+index_women_email <- which(new_datafile$email_segment == "Womens E-Mail")
+
+new_datafile$email_segment[index_men_email] = "Mens_E_Mail"
+new_datafile$email_segment[index_women_email] = "Womens_E_Mail"
+
+#create a column vector of column names to convert them to factors
+columns <- c("mens","womens", "zip_area","purchase_segment", "email_segment", "dependent", "employed", "phone", "delivery", "marriage", "payment_card", "visit","new_customer", "channel")
+
+#use lapply fucntion to convert all the required columns to factors
+new_datafile[columns] <- lapply(new_datafile[columns], as.factor)
+
+#check the updated structure of the dataset
+str(new_datafile)
+summary(new_datafile)
+
+```
+
+## Handling the NA values
+
+```{r}
+
+#there are indexes for which there are NA values in purchase_segment
+indexes = which(is.na(new_datafile$purchase_segment))
+
+#But there are corresponding values in "Purchase" column which can be used to fill up these purchase_segment values
+new_datafile$purchase_segment <- with(new_datafile,
+                                             ifelse(purchase>=0 & purchase<100,"1) 0 - 100",
+                                             ifelse(purchase>=100 & purchase<200, "2) 100 - 200",
+                                             ifelse(purchase>=200 & purchase<350, "3) 200 - 350",
+                                             ifelse(purchase>=350 & purchase<500, "4) 350 - 500",
+                                             ifelse(purchase>=500 & purchase<750, "5) 500 - 750",
+                                             ifelse(purchase>=750 & purchase<1000,"6) 750 - 1000",
+                                             ifelse(purchase>=1000, "7) 1000+",NA))))))))
+#changing the data-type to factors
+new_datafile$purchase_segment <- as.factor(new_datafile$purchase_segment)
+```
+
+
+##One Hot Encoding for categorical videos
+
+```{r}
+
+cols<-c("zip_area", "channel", "email_segment","delivery","marriage")
+new_datafile <- one_hot(as.data.table(new_datafile), cols)
+
+
+```
+
+##Data Preparation
+
+```{r}
+
+table(new_datafile$visit)
+prop.table(table(new_datafile$visit))
+set.seed(10)
+
+split <- sample.split(new_datafile$visit, SplitRatio = 0.70)   
+
+training <- subset(new_datafile, split == TRUE) 
+
+oversampled <- ovun.sample(visit ~., data = training, method = "over", p=0.5, seed=1)$data
+table(oversampled$visit)
+prop.table(table(oversampled$visit))
+
+
+bothsampled <- ovun.sample(visit ~., data = training, method = "both", p=0.25, seed=1)$data
+table(bothsampled$visit)
+prop.table(table(bothsampled$visit))
+
+test <- subset(new_datafile, split == FALSE) 
+
+```
+
+##Information Gain
+
+```{r}
+weights <- information.gain(visit ~., new_datafile)
+
+# Print weights
+print(weights)
+
+```
+
+## Modelling
+
+```{r}
+start = Sys.time()
+svm1 <- svm(visit ~. , data = oversampled, kernel = "radial", scale = TRUE, probability = TRUE)
+end = Sys.time()
+
+total_time = as.numeric(end - start)
+# Predicting the Test set results 
+svm_predict = predict(svm1, test)
+
+# Find the percentage of correct predictions
+ 
+accuracy_svm <- length(which(svm_predict == test$visit))/nrow(test)
+
+accuracy_svm
+```
+
+## Model Evaluation
+
+```{r}
+confusionMatrix(svm_predict, test$visit, positive='1', mode = "prec_recall")
+
+```
+
+```{r}
+#install.packages("pROC")
+library(pROC)
+
+# Add probability = TRUE for SVM; model_SVM
+SVMpred <- predict(svm1, test, probability = T)
+
+# Obtain predicted probabilities for SVM
+prob_SVM <- attr(SVMpred, "probabilities")
+
+ROC_SVM <- roc(test$visit, prob_SVM[, 1])
+
+ggroc(ROC_SVM, legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") +
+    geom_abline(intercept = 0, slope = 1, # random baseline model
+                color = "darkgrey", linetype = "dashed")
+
+auc(ROC_SVM)
+
+```
+
+```{r}
+#install.packages("CustomerScoringMetrics")
+library(CustomerScoringMetrics)
+GainTable_SVM <- cumGainsTable(prob_SVM[, 2], test$visit, resolution = 1/100)
+
+plot(GainTable_SVM[, 4], col="red", type="l",
+     xlab="% of test instances", 
+     ylab="% of correct positive predictions (True Positive Rate)")
+
+```
+
+
+```{r}
+# tune() function uses random numbers. Therefore, set a seed 
+set.seed(1)
+
+# Find the best cost value among the list (0.5, 1, 1.5, 5) 
+tune_out = tune(svm, visit ~ ., data = training, kernel= "radial", scale = TRUE, 
+                ranges = list(cost=c(0.5, 1, 1.5, 5)))
+
+
+
+```
